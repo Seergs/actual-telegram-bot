@@ -73,11 +73,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_accounts()
     await update.message.reply_text(
         "👋 *Actual Budget Bot*\n\n"
-        "Format: `payee amount [account]`\n\n"
+        "Format: `payee amount [account] [date]`\n\n"
         "Examples:\n"
         "`starbucks 80`\n"
         "`netflix 120 credit`\n"
-        "`uber 145 2`\n\n"
+        "`uber 145 yesterday`\n"
+        "`renta 12000 debito lunes`\n"
+        "`gasolina 500 28/05`\n\n"
         f"Active account: *{_active_account['name']}*\n\n"
         "Commands:\n"
         "/account — view or change active account\n"
@@ -141,7 +143,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    payee_query, amount, account_override = parsed
+    payee_query, amount, account_override, date_override = parsed
 
     if account_override:
         account = fuzzy_resolve_account(account_override, accounts)
@@ -158,12 +160,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     match = match_payee(payee_query, payees)
 
     if match["type"] == "auto":
-        await _insert_and_confirm(update, match["payee"], amount, account)
+        await _insert_and_confirm(update, match["payee"], amount, account, date_override)
 
     elif match["type"] == "suggest":
         keyboard = []
         for opt in match["options"]:
-            key = store_callback({"action": "pay", "payee": opt, "amount": amount, "account": account})
+            key = store_callback({"action": "pay", "payee": opt, "amount": amount, "account": account, "date": date_override})
             keyboard.append([InlineKeyboardButton(opt, callback_data=key)])
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
         await update.message.reply_text(
@@ -173,7 +175,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     else:
-        key = store_callback({"action": "new", "payee": payee_query.title(), "amount": amount, "account": account})
+        key = store_callback({"action": "new", "payee": payee_query.title(), "amount": amount, "account": account, "date": date_override})
         keyboard = [
             [InlineKeyboardButton(f"✅ Create \"{payee_query.title()}\"", callback_data=key)],
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
@@ -199,19 +201,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text("⏳ Inserting...")
     try:
-        await insert_transaction(data["payee"], data["amount"], data["account"]["id"])
+        await insert_transaction(data["payee"], data["amount"], data["account"]["id"], data.get("date"))
+        date_label = f" · _{data['date']}_" if data.get("date") else ""
         await query.edit_message_text(
-            f"✅ *{data['payee']}* ${data['amount']:,.2f}\n_{data['account']['name']}_",
+            f"✅ *{data['payee']}* ${data['amount']:,.2f}\n_{data['account']['name']}{date_label}_",
             parse_mode="Markdown"
         )
     except Exception as e:
         await query.edit_message_text(f"❌ Error: {e}")
 
-async def _insert_and_confirm(update: Update, payee: str, amount: float, account: dict):
+async def _insert_and_confirm(update: Update, payee: str, amount: float, account: dict, tx_date: str | None = None):
     try:
-        await insert_transaction(payee, amount, account["id"])
+        await insert_transaction(payee, amount, account["id"], tx_date)
+        date_label = f" · _{tx_date}_" if tx_date else ""
         await update.message.reply_text(
-            f"✅ *{payee}* ${amount:,.2f}\n_{account['name']}_",
+            f"✅ *{payee}* ${amount:,.2f}\n_{account['name']}{date_label}_",
             parse_mode="Markdown"
         )
     except Exception as e:

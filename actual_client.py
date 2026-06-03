@@ -17,11 +17,11 @@ async def fetch_accounts() -> list[dict]:
         r.raise_for_status()
         return [a for a in r.json()["data"] if not a["closed"] and not a["offbudget"]]
 
-async def insert_transaction(payee_name: str, amount: float, account_id: str) -> str:
+async def insert_transaction(payee_name: str, amount: float, account_id: str, tx_date: str | None = None) -> str:
     milliunits = -int(round(amount * 100))
     payload = {
         "transactions": [{
-            "date": date.today().isoformat(),
+            "date": tx_date or date.today().isoformat(),
             "amount": milliunits,
             "payee_name": payee_name,
             "cleared": False,
