@@ -1,5 +1,4 @@
-from bot import create_app
+from bot import main
 
 if __name__ == "__main__":
-    app = create_app()
-    app.run_polling()
+    main()

@@ -1,31 +1,67 @@
-import asyncio
 import logging
+import uuid
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
-from config import TELEGRAM_TOKEN, TELEGRAM_ALLOWED_USER_ID
-from actual_client import fetch_payees, insert_transaction
-from payee_matcher import match_payee, parse_message
+from config import TELEGRAM_TOKEN, TELEGRAM_ALLOWED_USER_ID, ACTUAL_ACCOUNT_DEFAULT
+from actual_client import fetch_payees, fetch_accounts, insert_transaction
+from payee_matcher import match_payee, parse_message_with_account
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Cache de payees
+# Caches
 _payees_cache: list[dict] = []
-_cache_ts: datetime | None = None
+_payees_cache_ts: datetime | None = None
+_accounts_cache: list[dict] = []
+_active_account: dict | None = None
 CACHE_TTL_SECONDS = 3600
 
+# Pending callbacks
+_pending_callbacks: dict[str, dict] = {}
+
+def store_callback(data: dict) -> str:
+    key = str(uuid.uuid4())[:8]
+    _pending_callbacks[key] = data
+    return key
+
 async def get_payees() -> list[dict]:
-    global _payees_cache, _cache_ts
+    global _payees_cache, _payees_cache_ts
     now = datetime.now()
-    if not _cache_ts or (now - _cache_ts).seconds > CACHE_TTL_SECONDS:
+    if not _payees_cache_ts or (now - _payees_cache_ts).seconds > CACHE_TTL_SECONDS:
         _payees_cache = await fetch_payees()
-        _cache_ts = now
+        _payees_cache_ts = now
         logger.info(f"Payees cache refreshed: {len(_payees_cache)} payees")
     return _payees_cache
+
+async def get_accounts() -> list[dict]:
+    global _accounts_cache, _active_account
+    if not _accounts_cache:
+        _accounts_cache = await fetch_accounts()
+        default_name = ACTUAL_ACCOUNT_DEFAULT.lower()
+        _active_account = next(
+            (a for a in _accounts_cache if a["name"].lower() == default_name),
+            _accounts_cache[0] if _accounts_cache else None
+        )
+        logger.info(f"Accounts loaded: {[a['name'] for a in _accounts_cache]}, default: {_active_account['name']}")
+    return _accounts_cache
+
+def fuzzy_resolve_account(query: str, accounts: list[dict]) -> dict | None:
+    from rapidfuzz import process, fuzz
+    try:
+        idx = int(query) - 1
+        if 0 <= idx < len(accounts):
+            return accounts[idx]
+    except ValueError:
+        pass
+    names = [a["name"] for a in accounts]
+    result = process.extractOne(query, names, scorer=fuzz.WRatio)
+    if result and result[1] >= 60:
+        return next(a for a in accounts if a["name"] == result[0])
+    return None
 
 def is_allowed(update: Update) -> bool:
     return update.effective_user.id == TELEGRAM_ALLOWED_USER_ID
@@ -33,68 +69,117 @@ def is_allowed(update: Update) -> bool:
 # ── Handlers ──────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        return
+    if not is_allowed(update): return
+    await get_accounts()
     await update.message.reply_text(
-        "👋 Bot de Actual Budget listo.\n\n"
-        "Envía una transacción así:\n"
+        "👋 *Actual Budget Bot*\n\n"
+        "Format: `payee amount [account]`\n\n"
+        "Examples:\n"
         "`starbucks 80`\n"
-        "`netflix 120`\n"
-        "`uber 145`",
+        "`netflix 120 credit`\n"
+        "`uber 145 2`\n\n"
+        f"Active account: *{_active_account['name']}*\n\n"
+        "Commands:\n"
+        "/account — view or change active account\n"
+        "/accounts — list available accounts\n"
+        "/refresh — refresh payees cache",
         parse_mode="Markdown"
     )
 
-async def refresh_payees(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        return
-    global _cache_ts
-    _cache_ts = None
-    await get_payees()
-    await update.message.reply_text("✅ Lista de payees actualizada.")
+async def accounts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update): return
+    accounts = await get_accounts()
+    lines = "\n".join(f"{i+1}. {a['name']}" for i, a in enumerate(accounts))
+    await update.message.reply_text(
+        f"*Available accounts:*\n{lines}\n\n"
+        f"Active: *{_active_account['name']}*",
+        parse_mode="Markdown"
+    )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        return
+async def account_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update): return
+    global _active_account
+    accounts = await get_accounts()
 
-    text = update.message.text.strip()
-    parsed = parse_message(text)
-
-    if not parsed:
+    if not context.args:
+        lines = "\n".join(f"{i+1}. {a['name']}" for i, a in enumerate(accounts))
         await update.message.reply_text(
-            "No entendí. Formato: `payee monto`\nEjemplo: `starbucks 80`",
+            f"Active account: *{_active_account['name']}*\n\n"
+            f"*Available:*\n{lines}\n\n"
+            "To change: `/account 1` or `/account <name>`",
             parse_mode="Markdown"
         )
         return
 
-    payee_query, amount = parsed
+    query = " ".join(context.args)
+    account = fuzzy_resolve_account(query, accounts)
+    if not account:
+        await update.message.reply_text(f"❌ Account `{query}` not found.", parse_mode="Markdown")
+        return
+
+    _active_account = account
+    await update.message.reply_text(f"✅ Active account: *{account['name']}*", parse_mode="Markdown")
+
+async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update): return
+    global _payees_cache_ts
+    _payees_cache_ts = None
+    await get_payees()
+    await update.message.reply_text("✅ Payees refreshed.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update): return
+
+    text = update.message.text.strip()
+    accounts = await get_accounts()
+    parsed = parse_message_with_account(text, accounts)
+
+    if not parsed:
+        await update.message.reply_text(
+            "Didn't understand. Format: `payee amount [account]`\nExample: `starbucks 80`",
+            parse_mode="Markdown"
+        )
+        return
+
+    payee_query, amount, account_override = parsed
+
+    if account_override:
+        account = fuzzy_resolve_account(account_override, accounts)
+        if not account:
+            await update.message.reply_text(
+                f"❌ Account `{account_override}` not found.",
+                parse_mode="Markdown"
+            )
+            return
+    else:
+        account = _active_account
+
     payees = await get_payees()
     match = match_payee(payee_query, payees)
 
     if match["type"] == "auto":
-        # Insertar directo
-        await _insert_and_confirm(update, match["payee"], amount)
+        await _insert_and_confirm(update, match["payee"], amount, account)
 
     elif match["type"] == "suggest":
-        # Mostrar opciones
-        keyboard = [
-            [InlineKeyboardButton(opt, callback_data=f"pay|{opt}|{amount}")]
-            for opt in match["options"]
-        ]
-        keyboard.append([InlineKeyboardButton("❌ Cancelar", callback_data="cancel")])
+        keyboard = []
+        for opt in match["options"]:
+            key = store_callback({"action": "pay", "payee": opt, "amount": amount, "account": account})
+            keyboard.append([InlineKeyboardButton(opt, callback_data=key)])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
         await update.message.reply_text(
-            f"¿Cuál payee quisiste decir para *{payee_query}*?",
+            f"Which payee for *{payee_query}*?",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     else:
-        # No encontrado — preguntar si crear
+        key = store_callback({"action": "new", "payee": payee_query.title(), "amount": amount, "account": account})
         keyboard = [
-            [InlineKeyboardButton(f"✅ Crear \"{payee_query.title()}\"", callback_data=f"new|{payee_query.title()}|{amount}")],
-            [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
+            [InlineKeyboardButton(f"✅ Create \"{payee_query.title()}\"", callback_data=key)],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
         ]
         await update.message.reply_text(
-            f"No encontré *{payee_query}* en tus payees.\n¿Quieres crearlo?",
+            f"Payee *{payee_query}* not found. Create it?",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -104,38 +189,57 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "cancel":
-        await query.edit_message_text("❌ Cancelado.")
+        await query.edit_message_text("❌ Cancelled.")
         return
 
-    parts = query.data.split("|")
-    action = parts[0]
-    payee = parts[1]
-    amount = float(parts[2])
+    data = _pending_callbacks.pop(query.data, None)
+    if not data:
+        await query.edit_message_text("❌ Expired, please try again.")
+        return
 
-    if action in ("pay", "new"):
-        await query.edit_message_text(f"⏳ Insertando...")
-        await _insert_and_confirm_query(query, payee, amount)
-
-async def _insert_and_confirm(update: Update, payee: str, amount: float):
+    await query.edit_message_text("⏳ Inserting...")
     try:
-        await insert_transaction(payee, amount)
-        await update.message.reply_text(f"✅ *{payee}* ${amount:,.2f}", parse_mode="Markdown")
+        await insert_transaction(data["payee"], data["amount"], data["account"]["id"])
+        await query.edit_message_text(
+            f"✅ *{data['payee']}* ${data['amount']:,.2f}\n_{data['account']['name']}_",
+            parse_mode="Markdown"
+        )
     except Exception as e:
-        logger.error(f"Error inserting transaction: {e}")
-        await update.message.reply_text(f"❌ Error al insertar: {e}")
+        await query.edit_message_text(f"❌ Error: {e}")
 
-async def _insert_and_confirm_query(query, payee: str, amount: float):
+async def _insert_and_confirm(update: Update, payee: str, amount: float, account: dict):
     try:
-        await insert_transaction(payee, amount)
-        await query.edit_message_text(f"✅ *{payee}* ${amount:,.2f}", parse_mode="Markdown")
+        await insert_transaction(payee, amount, account["id"])
+        await update.message.reply_text(
+            f"✅ *{payee}* ${amount:,.2f}\n_{account['name']}_",
+            parse_mode="Markdown"
+        )
     except Exception as e:
-        logger.error(f"Error inserting transaction: {e}")
-        await query.edit_message_text(f"❌ Error al insertar: {e}")
+        logger.error(f"Error inserting: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
 
-def create_app() -> Application:
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+async def _post_init(application):
+    await application.bot.set_my_commands([
+        ("start", "Show usage instructions"),
+        ("account", "View or change active account"),
+        ("accounts", "List available accounts"),
+        ("refresh", "Refresh payees cache"),
+    ])
+
+def main():
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(_post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("refresh", refresh_payees))
+    app.add_handler(CommandHandler("account", account_cmd))
+    app.add_handler(CommandHandler("accounts", accounts_cmd))
+    app.add_handler(CommandHandler("refresh", refresh_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    return app
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
