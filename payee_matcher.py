@@ -69,7 +69,16 @@ def match_payee(query: str, payees: list[dict]) -> dict:
         if name.lower() == query.lower():
             return {"type": "auto", "payee": name, "score": 100}
 
+    # For small queries
+    if len(query) >= 2:
+        prefix_matches = [n for n in names if n.lower().startswith(query.lower())]
+        if len(prefix_matches) == 1:
+            return {"type": "auto", "payee": prefix_matches[0], "score": 95}
+        elif len(prefix_matches) > 1:
+            return {"type": "suggest", "options": prefix_matches[:3]}
+
     result = process.extractOne(query, names, scorer=fuzz.WRatio)
+
     if not result:
         return {"type": "none"}
 
