@@ -7,7 +7,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 from config import TELEGRAM_TOKEN, TELEGRAM_ALLOWED_USER_ID, ACTUAL_ACCOUNT_DEFAULT
-from actual_client import fetch_payees, fetch_accounts, insert_transaction
+from actual_client import fetch_payees, fetch_accounts, insert_transaction, delete_transaction
 from payee_matcher import match_payee, parse_message_with_account
 
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +22,9 @@ CACHE_TTL_SECONDS = 3600
 
 # Pending callbacks
 _pending_callbacks: dict[str, dict] = {}
+
+# Last inserted transaction
+_last_transaction: dict[str, dict] = {}
 
 def store_callback(data: dict) -> str:
     key = str(uuid.uuid4())[:8]
@@ -129,6 +132,26 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_payees()
     await update.message.reply_text("✅ Payees refreshed.")
 
+async def undo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update): return
+    user_id = str(update.effective_user.id)
+    last = _last_transaction.get(user_id)
+
+    if not last or not last.get("id"):
+        await update.message.reply_text("Nothing to undo.")
+        return
+
+    success = await delete_transaction(last["id"])
+    if success:
+        sign = "+" if last["is_income"] else "-"
+        _last_transaction.pop(user_id)
+        await update.message.reply_text(
+            f"↩️ Undone: *{last['payee']}* {sign}${last['amount']:,.2f}\n_{last['account_name']}_",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text("❌ Failed to undo. Transaction may have already been deleted.")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update): return
 
@@ -207,10 +230,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text("⏳ Inserting...")
     try:
-        await insert_transaction(
+        tx_id = await insert_transaction(
             data["payee"], data["amount"], data["account"]["id"],
             data.get("date"), data.get("is_income", False)
         )
+        _last_transaction[str(query.from_user.id)] = {
+            "id": tx_id,
+            "account_id": data["account"]["id"],
+            "payee": data["payee"],
+            "amount": data["amount"],
+            "account_name": data["account"]["name"],
+            "is_income": data.get("is_income", False)
+        }
         date_label = f" · _{data['date']}_" if data.get("date") else ""
         sign = "+" if data.get("is_income") else "-"
         await query.edit_message_text(
@@ -225,7 +256,15 @@ async def _insert_and_confirm(
     account: dict, tx_date: str | None = None, is_income: bool = False
 ):
     try:
-        await insert_transaction(payee, amount, account["id"], tx_date, is_income)
+        tx_id = await insert_transaction(payee, amount, account["id"], tx_date, is_income)
+        _last_transaction[str(update.effective_user.id)] = {
+            "id": tx_id,
+            "account_id": account["id"],
+            "payee": payee,
+            "amount": amount,
+            "account_name": account["name"],
+            "is_income": is_income
+        }
         date_label = f" · _{tx_date}_" if tx_date else ""
         sign = "+" if is_income else "-"
         await update.message.reply_text(
@@ -242,6 +281,7 @@ async def _post_init(application):
         ("account", "View or change active account"),
         ("accounts", "List available accounts"),
         ("refresh", "Refresh payees cache"),
+        ("undo", "Undo the last added transaction"),
     ])
 
 def main():
@@ -255,6 +295,7 @@ def main():
     app.add_handler(CommandHandler("account", account_cmd))
     app.add_handler(CommandHandler("accounts", accounts_cmd))
     app.add_handler(CommandHandler("refresh", refresh_cmd))
+    app.add_handler(CommandHandler("undo", undo_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.run_polling()

@@ -42,3 +42,11 @@ async def insert_transaction(
         r.raise_for_status()
         data = r.json()["data"]
         return data["added"][0] if data["added"] else None
+
+async def delete_transaction(transaction_id: str) -> bool:
+    async with httpx.AsyncClient() as client:
+        r = await client.delete(
+            f"{BASE}/budgets/{ACTUAL_BUDGET_ID}/transactions/{transaction_id}",
+            headers=HEADERS
+        )
+        return r.status_code in (200, 204)
