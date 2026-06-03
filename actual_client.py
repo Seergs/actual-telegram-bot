@@ -1,5 +1,5 @@
 import httpx
-from config import ACTUAL_SERVER_URL, ACTUAL_API_KEY, ACTUAL_BUDGET_ID, ACTUAL_ACCOUNT_ID
+from config import ACTUAL_SERVER_URL, ACTUAL_API_KEY, ACTUAL_BUDGET_ID 
 from datetime import date
 
 BASE = f"{ACTUAL_SERVER_URL}/v1"
@@ -11,7 +11,13 @@ async def fetch_payees() -> list[dict]:
         r.raise_for_status()
         return r.json()["data"]
 
-async def insert_transaction(payee_name: str, amount: float) -> str:
+async def fetch_accounts() -> list[dict]:
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{BASE}/budgets/{ACTUAL_BUDGET_ID}/accounts", headers=HEADERS)
+        r.raise_for_status()
+        return [a for a in r.json()["data"] if not a["closed"] and not a["offbudget"]]
+
+async def insert_transaction(payee_name: str, amount: float, account_id: str) -> str:
     milliunits = -int(round(amount * 100))
     payload = {
         "transactions": [{
@@ -23,7 +29,7 @@ async def insert_transaction(payee_name: str, amount: float) -> str:
     }
     async with httpx.AsyncClient() as client:
         r = await client.post(
-            f"{BASE}/budgets/{ACTUAL_BUDGET_ID}/accounts/{ACTUAL_ACCOUNT_ID}/transactions/import",
+            f"{BASE}/budgets/{ACTUAL_BUDGET_ID}/accounts/{account_id}/transactions/import",
             headers=HEADERS,
             json=payload
         )
