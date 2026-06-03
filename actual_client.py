@@ -1,5 +1,5 @@
 import httpx
-from config import ACTUAL_SERVER_URL, ACTUAL_API_KEY, ACTUAL_BUDGET_ID 
+from config import ACTUAL_SERVER_URL, ACTUAL_API_KEY, ACTUAL_BUDGET_ID
 from datetime import date
 
 BASE = f"{ACTUAL_SERVER_URL}/v1"
@@ -17,8 +17,14 @@ async def fetch_accounts() -> list[dict]:
         r.raise_for_status()
         return [a for a in r.json()["data"] if not a["closed"] and not a["offbudget"]]
 
-async def insert_transaction(payee_name: str, amount: float, account_id: str, tx_date: str | None = None) -> str:
-    milliunits = -int(round(amount * 100))
+async def insert_transaction(
+    payee_name: str,
+    amount: float,
+    account_id: str,
+    tx_date: str | None = None,
+    is_income: bool = False
+) -> str:
+    milliunits = int(round(amount * 100)) if is_income else -int(round(amount * 100))
     payload = {
         "transactions": [{
             "date": tx_date or date.today().isoformat(),

@@ -75,11 +75,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *Actual Budget Bot*\n\n"
         "Format: `payee amount [account] [date]`\n\n"
         "Examples:\n"
-        "`starbucks 80`\n"
+        "`starbucks 80` — expense\n"
+        "`payroll +15000` — income\n"
         "`netflix 120 credit`\n"
         "`uber 145 yesterday`\n"
-        "`renta 12000 debito lunes`\n"
-        "`gasolina 500 28/05`\n\n"
+        "`rent 12000 debit monday`\n\n"
         f"Active account: *{_active_account['name']}*\n\n"
         "Commands:\n"
         "/account — view or change active account\n"
@@ -138,12 +138,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not parsed:
         await update.message.reply_text(
-            "Didn't understand. Format: `payee amount [account]`\nExample: `starbucks 80`",
+            "Didn't understand. Format: `payee amount [account] [date]`\nExample: `starbucks 80`",
             parse_mode="Markdown"
         )
         return
 
-    payee_query, amount, account_override, date_override = parsed
+    payee_query, amount, account_override, date_override, is_income = parsed
 
     if account_override:
         account = fuzzy_resolve_account(account_override, accounts)
@@ -160,12 +160,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     match = match_payee(payee_query, payees)
 
     if match["type"] == "auto":
-        await _insert_and_confirm(update, match["payee"], amount, account, date_override)
+        await _insert_and_confirm(update, match["payee"], amount, account, date_override, is_income)
 
     elif match["type"] == "suggest":
         keyboard = []
         for opt in match["options"]:
-            key = store_callback({"action": "pay", "payee": opt, "amount": amount, "account": account, "date": date_override})
+            key = store_callback({
+                "action": "pay", "payee": opt, "amount": amount,
+                "account": account, "date": date_override, "is_income": is_income
+            })
             keyboard.append([InlineKeyboardButton(opt, callback_data=key)])
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
         await update.message.reply_text(
@@ -175,7 +178,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     else:
-        key = store_callback({"action": "new", "payee": payee_query.title(), "amount": amount, "account": account, "date": date_override})
+        key = store_callback({
+            "action": "new", "payee": payee_query.title(), "amount": amount,
+            "account": account, "date": date_override, "is_income": is_income
+        })
         keyboard = [
             [InlineKeyboardButton(f"✅ Create \"{payee_query.title()}\"", callback_data=key)],
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
@@ -201,21 +207,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text("⏳ Inserting...")
     try:
-        await insert_transaction(data["payee"], data["amount"], data["account"]["id"], data.get("date"))
+        await insert_transaction(
+            data["payee"], data["amount"], data["account"]["id"],
+            data.get("date"), data.get("is_income", False)
+        )
         date_label = f" · _{data['date']}_" if data.get("date") else ""
+        sign = "+" if data.get("is_income") else "-"
         await query.edit_message_text(
-            f"✅ *{data['payee']}* ${data['amount']:,.2f}\n_{data['account']['name']}{date_label}_",
+            f"✅ *{data['payee']}* {sign}${data['amount']:,.2f}\n_{data['account']['name']}{date_label}_",
             parse_mode="Markdown"
         )
     except Exception as e:
         await query.edit_message_text(f"❌ Error: {e}")
 
-async def _insert_and_confirm(update: Update, payee: str, amount: float, account: dict, tx_date: str | None = None):
+async def _insert_and_confirm(
+    update: Update, payee: str, amount: float,
+    account: dict, tx_date: str | None = None, is_income: bool = False
+):
     try:
-        await insert_transaction(payee, amount, account["id"], tx_date)
+        await insert_transaction(payee, amount, account["id"], tx_date, is_income)
         date_label = f" · _{tx_date}_" if tx_date else ""
+        sign = "+" if is_income else "-"
         await update.message.reply_text(
-            f"✅ *{payee}* ${amount:,.2f}\n_{account['name']}{date_label}_",
+            f"✅ *{payee}* {sign}${amount:,.2f}\n_{account['name']}{date_label}_",
             parse_mode="Markdown"
         )
     except Exception as e:

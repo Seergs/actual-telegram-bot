@@ -37,19 +37,18 @@ def resolve_date(token: str) -> str:
     n = normalize(token)
     today = date.today()
 
-    if n == "hoy" or n == "today":
+    if n in ("hoy", "today"):
         return today.isoformat()
-    if n == "ayer" or n == "yesterday":
+    if n in ("ayer", "yesterday"):
         return (today - timedelta(days=1)).isoformat()
 
     if n in DAY_MAP:
         target = DAY_MAP[n]
         days_ago = (today.weekday() - target) % 7
         if days_ago == 0:
-            days_ago = 7 
+            days_ago = 7
         return (today - timedelta(days=days_ago)).isoformat()
 
-    # DD/MM
     if re.match(r"^\d{1,2}/\d{1,2}$", token):
         day, month = map(int, token.split("/"))
         year = today.year
@@ -66,7 +65,6 @@ def resolve_date(token: str) -> str:
 def match_payee(query: str, payees: list[dict]) -> dict:
     names = [p["name"] for p in payees if not p.get("transfer_acct")]
 
-    # Exact match case-insensitive first
     for name in names:
         if name.lower() == query.lower():
             return {"type": "auto", "payee": name, "score": 100}
@@ -85,7 +83,7 @@ def match_payee(query: str, payees: list[dict]) -> dict:
     else:
         return {"type": "none", "query": query}
 
-def parse_message_with_account(text: str, accounts: list[dict]) -> tuple[str, float, str | None, str | None] | None:
+def parse_message_with_account(text: str, accounts: list[dict]) -> tuple[str, float, str | None, str | None, bool] | None:
     tokens = text.strip().split()
     if len(tokens) < 2:
         return None
@@ -105,7 +103,7 @@ def parse_message_with_account(text: str, accounts: list[dict]) -> tuple[str, fl
         is_account = any(normalize(last) in normalize(a["name"]) for a in accounts)
         if is_number or is_account:
             try:
-                float(tokens[-2].replace(",", "."))
+                float(tokens[-2].replace(",", ".").lstrip("+"))
                 account_override = last
                 tokens = tokens[:-1]
             except ValueError:
@@ -113,10 +111,12 @@ def parse_message_with_account(text: str, accounts: list[dict]) -> tuple[str, fl
 
     # 3. Parse amount and payee
     try:
-        amount = float(tokens[-1].replace(",", "."))
+        raw_amount = tokens[-1].replace(",", ".")
+        is_income = raw_amount.startswith("+")
+        amount = float(raw_amount.lstrip("+"))
         payee = " ".join(tokens[:-1])
         if not payee:
             return None
-        return payee, amount, account_override, date_override
+        return payee, amount, account_override, date_override, is_income
     except ValueError:
         return None
