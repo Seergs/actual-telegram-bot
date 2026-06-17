@@ -5,14 +5,16 @@ from datetime import date
 BASE = f"{ACTUAL_SERVER_URL}/v1"
 HEADERS = {"x-api-key": ACTUAL_API_KEY, "Content-Type": "application/json"}
 
+TIMEOUT = httpx.Timeout(30.0)
+
 async def fetch_payees() -> list[dict]:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         r = await client.get(f"{BASE}/budgets/{ACTUAL_BUDGET_ID}/payees", headers=HEADERS)
         r.raise_for_status()
         return r.json()["data"]
 
 async def fetch_accounts() -> list[dict]:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         r = await client.get(f"{BASE}/budgets/{ACTUAL_BUDGET_ID}/accounts", headers=HEADERS)
         r.raise_for_status()
         return [a for a in r.json()["data"] if not a["closed"] and not a["offbudget"]]
@@ -33,7 +35,7 @@ async def insert_transaction(
             "cleared": False,
         }]
     }
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         r = await client.post(
             f"{BASE}/budgets/{ACTUAL_BUDGET_ID}/accounts/{account_id}/transactions/import",
             headers=HEADERS,

@@ -272,8 +272,8 @@ async def _insert_and_confirm(
             parse_mode="Markdown"
         )
     except Exception as e:
-        logger.error(f"Error inserting: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
+        logger.exception(f"Error inserting ({type(e).__name__}): {e}")
+        await update.message.reply_text("❌ Error inserting transaction, check logs.")
 
 async def _post_init(application):
     await application.bot.set_my_commands([
